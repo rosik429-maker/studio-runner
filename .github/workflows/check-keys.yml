@@ -1,0 +1,30 @@
+name: Проверка ключей
+
+# Бесплатная проверка: ключи заданы, Runware отвечает (печатается только баланс).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: rosik429-maker/youtube-auto-studio
+          token: ${{ secrets.STUDIO_TOKEN }}
+          persist-credentials: false
+      - name: Keys present
+        env:
+          L: ${{ secrets.LUMEAN_API_KEY }}
+          R: ${{ secrets.RUNWARE_API_KEY }}
+        run: |
+          [ -n "$L" ] && echo "LUMEAN_API_KEY: задан" || echo "::error::LUMEAN_API_KEY пуст"
+          [ -n "$R" ] && echo "RUNWARE_API_KEY: задан" || echo "::error::RUNWARE_API_KEY пуст"
+      - name: Runware balance
+        env:
+          RUNWARE_API_KEY: ${{ secrets.RUNWARE_API_KEY }}
+        run: python3 tools/runware_balance.py

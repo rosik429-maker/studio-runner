@@ -1,0 +1,85 @@
+name: EXB Telegram — будильник 9:00
+
+# Чтобы пост в @exb_video выходил РОВНО в 9:00 по Берлину (пн–сб).
+# GitHub запускает задачи по расписанию с опозданием, поэтому этот запуск
+# стартует заранее (7:30 и 8:00 по Берлину, зимой и летом), ждёт до 8:58
+# и запускает публикацию в закрытом репозитории. Та ждёт до 9:00:00 и
+# отправляет пост. Здесь минуты бесплатные, поэтому ожидание ничего не стоит.
+# Повтор исключён: если пост уже отправлен (sent.json), ничего не делается.
+# После 9:30 пост не отправляется никогда (проверяет и сама публикация).
+
+on:
+  schedule:
+    - cron: '30 5 * * 1-6'
+    - cron: '0 6 * * 1-6'
+    - cron: '30 6 * * 1-6'
+    - cron: '0 7 * * 1-6'
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Проверка доступа: запустить публикацию сразу (вне 9:00–9:30 она ничего не отправит)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exb-telegram-9am
+  cancel-in-progress: false
+
+jobs:
+  alarm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Wait for 8:58 and start the post
+        env:
+          STUDIO_TOKEN: ${{ secrets.STUDIO_TOKEN }}
+          TEST: ${{ inputs.test }}
+        shell: python3 {0}
+        run: |
+          import datetime, json, os, sys, time, urllib.request, urllib.error
+          from zoneinfo import ZoneInfo
+          REPO = "rosik429-maker/youtube-auto-studio"
+          WORKFLOW = "exb-telegram.yml"
+          B = ZoneInfo("Europe/Berlin")
+          tok = os.environ["STUDIO_TOKEN"]
+
+          def api(method, path, body=None):
+              req = urllib.request.Request(
+                  "https://api.github.com/repos/" + REPO + path, method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"Authorization": "Bearer " + tok,
+                           "Accept": "application/vnd.github+json"})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return r.status
+              except urllib.error.HTTPError as e:
+                  return e.code
+
+          now = datetime.datetime.now(B)
+          test = os.environ.get("TEST") == "true"
+          go = now.replace(hour=8, minute=58, second=0, microsecond=0)
+          deadline = now.replace(hour=9, minute=25, second=0, microsecond=0)
+          if not test:
+              if now < now.replace(hour=7, minute=15, second=0, microsecond=0) or now > deadline:
+                  print(f"{now:%H:%M} по Берлину — не время, выход.")
+                  sys.exit(0)
+              if api("GET", f"/contents/queue/{now:%Y-%m-%d}/sent.json?ref=telegram-queue") == 200:
+                  print("Пост на сегодня уже отправлен.")
+                  sys.exit(0)
+              if now < go:
+                  wait = (go - now).total_seconds()
+                  print(f"{now:%H:%M:%S} — жду до 8:58 ({int(wait)} с).")
+                  time.sleep(wait)
+              if api("GET", f"/contents/queue/{now:%Y-%m-%d}/sent.json?ref=telegram-queue") == 200:
+                  print("Пост на сегодня уже отправлен.")
+                  sys.exit(0)
+          code = api("POST", f"/actions/workflows/{WORKFLOW}/dispatches",
+                     {"ref": "main", "inputs": {"force": "false"}})
+          if code != 204:
+              print(f"::error::Не удалось запустить публикацию (HTTP {code}). "
+                    "Токену STUDIO_TOKEN нужно право Actions: Read and write.")
+              sys.exit(1)
+          print(f"{datetime.datetime.now(B):%H:%M:%S} — публикация запущена, пост выйдет в 9:00.")

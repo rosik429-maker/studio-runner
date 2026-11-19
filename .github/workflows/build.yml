@@ -1,0 +1,114 @@
+name: Studio build (runner)
+
+# Открытый «сборщик»: здесь минуты GitHub Actions бесплатны.
+# Код, задания и готовые видео лежат в ЗАКРЫТОМ репозитории
+# rosik429-maker/youtube-auto-studio; сюда ничего из них не сохраняется.
+# Готовое видео отправляется обратно в закрытый репозиторий,
+# в ветку deliveries-run-<id этого запуска>. Архивов (artifacts) нет —
+# в открытом репозитории их мог бы скачать кто угодно.
+
+run-name: "Видео: ${{ inputs.job || 'демо' }} (${{ inputs.ref }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ветка закрытого репозитория youtube-auto-studio, где лежит задание"
+        required: true
+        default: main
+        type: string
+      job:
+        description: "Папка задания, например jobs/2026-10-23-tema (пусто — демо-выпуск)"
+        required: false
+        default: ""
+        type: string
+      test_mode:
+        description: "Тест без платных сервисов (без Lumean и Runware, бесплатно)"
+        required: false
+        default: false
+        type: boolean
+      images_only:
+        description: "Только ИИ-картинки для пробы стиля (без Lumean и без видео)"
+        required: false
+        default: false
+        type: boolean
+      animate:
+        description: "Только видеоклипы из картинок (Runware, список animate в job.json), без Lumean"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ inputs.ref }}-${{ inputs.job }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Download private studio
+        uses: actions/checkout@v4
+        with:
+          repository: rosik429-maker/youtube-auto-studio
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.STUDIO_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Restore cached ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-static-v1-${{ runner.os }}
+
+      - name: Install video tools
+        timeout-minutes: 20
+        run: tools/install_ffmpeg.sh ~/ffmpeg
+
+      - name: Install Python dependencies
+        timeout-minutes: 10
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create video
+        env:
+          LUMEAN_API_KEY: ${{ secrets.LUMEAN_API_KEY }}
+          RUNWARE_API_KEY: ${{ secrets.RUNWARE_API_KEY }}
+          JOB_PATH: ${{ inputs.job }}
+          TEST_AUDIO: ${{ inputs.test_mode }}
+          IMAGES_ONLY: ${{ inputs.images_only }}
+          ANIMATE: ${{ inputs.animate }}
+        run: python main.py
+
+      - name: Send result to private repo
+        if: success()
+        env:
+          STUDIO_TOKEN: ${{ secrets.STUDIO_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          folder="run-${RUN_ID}"
+          mkdir -p "/tmp/d/$folder"
+          cd output
+          for f in video.mp4 cover.jpg cover.png title.txt description.txt; do [ -f "$f" ] && cp "$f" "/tmp/d/$folder/"; done
+          if [ -d generated ]; then mkdir -p "/tmp/d/$folder/generated"; find generated -maxdepth 1 -name '*.jpg' ! -name 'test_*' -exec cp {} "/tmp/d/$folder/generated/" \; ; fi
+          if [ -d clips ]; then mkdir -p "/tmp/d/$folder/clips"; cp clips/*.mp4 "/tmp/d/$folder/clips/" 2>/dev/null || true; fi
+          cd /tmp/d
+          find "$folder" -type f -size +95M -print0 | while IFS= read -r -d '' big; do split -b 90M -d "$big" "$big.part-"; rm "$big"; done
+          git init -q .
+          git config user.name "studio-runner"
+          git config user.email "studio-runner@users.noreply.github.com"
+          branch="deliveries-${folder}"
+          git checkout -q --orphan "$branch"
+          git add "$folder"
+          git commit -q -m "Видео из запуска ${RUN_ID} (studio-runner)"
+          git push -q -f "https://x-access-token:${STUDIO_TOKEN}@github.com/rosik429-maker/youtube-auto-studio.git" "$branch"
+          echo "Готово: ветка ${branch} в закрытом репозитории"
